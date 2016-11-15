@@ -1,0 +1,374 @@
+//=============================================================================
+// Copyright © 2008 Point Grey Research, Inc. All Rights Reserved.
+//
+// This software is the confidential and proprietary information of Point
+// Grey Research, Inc. ("Confidential Information").  You shall not
+// disclose such Confidential Information and shall use it only in
+// accordance with the terms of the license agreement you entered into
+// with PGR.
+//
+// PGR MAKES NO REPRESENTATIONS OR WARRANTIES ABOUT THE SUITABILITY OF THE
+// SOFTWARE, EITHER EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+// PURPOSE, OR NON-INFRINGEMENT. PGR SHALL NOT BE LIABLE FOR ANY DAMAGES
+// SUFFERED BY LICENSEE AS A RESULT OF USING, MODIFYING OR DISTRIBUTING
+// THIS SOFTWARE OR ITS DERIVATIVES.
+//=============================================================================
+//=============================================================================
+// $Id: AsyncTriggerEx.cpp,v 1.21 2010-07-22 22:51:51 soowei Exp $
+//=============================================================================
+
+#include "stdafx.h"
+#include <unistd.h>
+
+#include "FlyCapture2.h"
+#include <iostream>
+#include <sstream>
+#include <stdlib.h>
+
+
+//
+// Software trigger the camera instead of using an external hardware trigger
+//
+#define SOFTWARE_TRIGGER_CAMERA
+
+using namespace FlyCapture2;
+using namespace std;
+
+void PrintBuildInfo();
+void PrintCameraInfo( CameraInfo* pCamInfo );
+void PrintError( Error error );
+bool CheckSoftwareTriggerPresence( Camera* pCam );
+bool PollForTriggerReady( Camera* pCam );
+bool FireSoftwareTrigger( Camera* pCam );
+std::string prep_zeros6(int i);
+
+int main(int argc, char** argv){
+	PrintBuildInfo();
+
+	// variables
+	int k_numImages = 10;
+	if(argc>1){
+		k_numImages=atoi(argv[1]);
+	}
+	const unsigned int timeToSleep_ms = 500;
+	Error error;
+
+	// get number of cameras
+	BusManager busMgr;
+	unsigned int numCameras;
+	error = busMgr.GetNumOfCameras(&numCameras);
+	if (error != PGRERROR_OK){
+		PrintError( error );
+		return -1;
+	}
+	// end program if more than 1 camera is detected
+	if ( numCameras < 1 ){
+		cout << "Insufficient number of cameras... exiting" << endl; 
+		return -1;
+	}
+	// get camera PGRguide
+	PGRGuid guid;
+	error = busMgr.GetCameraFromIndex(0, &guid);
+	if (error != PGRERROR_OK){
+		PrintError( error );
+		return -1;
+	}
+
+	Camera cam;
+	// Connect to camera
+	error = cam.Connect(&guid);
+	if (error != PGRERROR_OK){
+		PrintError( error );
+		return -1;
+	}
+	// Power on the camera
+	const unsigned int k_cameraPower = 0x610;
+	const unsigned int k_powerVal = 0x80000000;
+	error  = cam.WriteRegister( k_cameraPower, k_powerVal );
+	if (error != PGRERROR_OK){
+		PrintError( error );
+		return -1;
+	}
+
+	const unsigned int millisecondsToSleep = 1000;
+	unsigned int regVal = 0;
+	unsigned int retries = 10;
+	// Wait for camera to complete power-up
+	do{
+		usleep(millisecondsToSleep * 1000);
+		error = cam.ReadRegister(k_cameraPower, &regVal);
+		if (error == PGRERROR_TIMEOUT){
+			// ignore timeout errors, camera may not be responding to
+			// register reads during power-up
+		}
+		else if (error != PGRERROR_OK){
+			PrintError( error );
+			return -1;
+		}
+		retries--;
+	}while ((regVal & k_powerVal) == 0 && retries > 0);
+	// Check for timeout errors after retrying
+	if (error == PGRERROR_TIMEOUT){
+		PrintError( error );
+		return -1;
+	}
+
+	// Get the camera information
+	CameraInfo camInfo;
+	error = cam.GetCameraInfo(&camInfo);
+	if (error != PGRERROR_OK){
+		PrintError( error );
+		return -1;
+	}
+	// print camera information
+	PrintCameraInfo(&camInfo);	  
+
+	// Get current trigger settings
+	TriggerMode triggerMode;
+	error = cam.GetTriggerMode( &triggerMode );
+	if (error != PGRERROR_OK){
+		PrintError( error );
+		return -1;
+	}
+
+	// Set camera to trigger mode 0
+	triggerMode.onOff = true;
+	triggerMode.mode = 0;
+	triggerMode.parameter = 0;
+
+	// A source of 7 means software trigger
+	triggerMode.source = 7;
+	
+	error = cam.SetTriggerMode( &triggerMode );
+	if (error != PGRERROR_OK)
+	{
+		PrintError( error );
+		return -1;
+	}
+	
+	// Poll to ensure camera is ready
+	bool retVal = PollForTriggerReady( &cam );
+	if( !retVal )
+	{
+		cout << endl;
+		cout << "Error polling for trigger ready!" << endl; 
+		return -1;
+	}
+
+	// Get the camera configuration
+	FC2Config config;
+	error = cam.GetConfiguration( &config );
+	if (error != PGRERROR_OK)
+	{
+		PrintError( error );
+		return -1;
+	} 
+	
+	// Set the grab timeout to 5 seconds
+	config.grabTimeout = 5000;
+
+	// Set the camera configuration
+	error = cam.SetConfiguration( &config );
+	if (error != PGRERROR_OK)
+	{
+		PrintError( error );
+		return -1;
+	} 
+
+	// Camera is ready, start capturing images
+	error = cam.StartCapture();
+	if (error != PGRERROR_OK)
+	{
+		PrintError( error );
+		return -1;
+	}   
+   	// check software trigger presence 
+	if (!CheckSoftwareTriggerPresence( &cam )){
+		cout << "SOFT_ASYNC_TRIGGER not implemented on this camera!  Stopping application" << endl ; 
+		return -1;
+	}
+	
+	// get images at given rate
+	Image image;
+	for ( int imageCount=0; imageCount < k_numImages; imageCount++ )
+	{
+		// Check that the trigger is ready
+		PollForTriggerReady( &cam);
+		// Sleep for gven time
+		usleep(timeToSleep_ms*1000);
+		// Fire software trigger
+		bool retVal = FireSoftwareTrigger( &cam );
+		if ( !retVal ){
+			cout << endl;
+			cout << "Error firing software trigger" << endl; 
+			return -1;		
+		}
+		// Grab image		
+		error = cam.RetrieveBuffer( &image );
+		if (error != PGRERROR_OK){
+			PrintError( error );
+			break;
+		}
+		// Create a converted image
+		Image convertedImage;
+		// Convert the raw image
+		error = image.Convert( PIXEL_FORMAT_RGB8 , &convertedImage );
+		if (error != PGRERROR_OK)
+		{
+			PrintError( error );
+			return -1;
+		}  
+		// Create a unique filename
+		ostringstream filename;
+		filename << "/home/auvsi-ucr/payload/cap/" << imageCount << ".png";
+		// Save the image. If a file format is not passed in, then the file
+		// extension is parsed to attempt to determine the file format.
+		error = convertedImage.Save( filename.str().c_str() );
+		if (error != PGRERROR_OK)
+		{
+			PrintError( error );
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+			return -1;
+		} 
+	}
+	// Turn trigger mode off.
+	triggerMode.onOff = false;	
+	error = cam.SetTriggerMode( &triggerMode );
+	if (error != PGRERROR_OK){
+		PrintError( error );
+		return -1;
+	}
+	// Stop capturing images
+	error = cam.StopCapture();
+	if (error != PGRERROR_OK){
+		PrintError( error );
+		return -1;
+	}	  
+
+	// Disconnect the camera
+	error = cam.Disconnect();
+	if (error != PGRERROR_OK){
+		PrintError( error );
+		return -1;
+	}
+
+	return 0;
+}
+
+void PrintBuildInfo(){
+	FC2Version fc2Version;
+	Utilities::GetLibraryVersion( &fc2Version );
+	
+	ostringstream version;
+	version << "FlyCapture2 library version: " << fc2Version.major << "." << fc2Version.minor << "." << fc2Version.type << "." << fc2Version.build;
+	cout << version.str() <<endl;  
+	
+	ostringstream timeStamp;
+	timeStamp << "Application build date: " << __DATE__ << " " << __TIME__;
+	cout << timeStamp.str() << endl << endl;  
+}
+
+void PrintCameraInfo( CameraInfo* pCamInfo ){
+	cout << endl;
+	cout << "*** CAMERA INFORMATION ***" << endl;
+	cout << "Serial number -" << pCamInfo->serialNumber << endl;
+	cout << "Camera model - " << pCamInfo->modelName << endl;
+	cout << "Camera vendor - " << pCamInfo->vendorName << endl;
+	cout << "Sensor - " << pCamInfo->sensorInfo << endl;
+	cout << "Resolution - " << pCamInfo->sensorResolution << endl;
+	cout << "Firmware version - " << pCamInfo->firmwareVersion << endl;
+	cout << "Firmware build time - " << pCamInfo->firmwareBuildTime << endl << endl;
+	
+}
+
+void PrintError( Error error )
+{
+	error.PrintErrorTrace();
+}
+
+bool CheckSoftwareTriggerPresence( Camera* pCam ){
+	const unsigned int k_triggerInq = 0x530;
+	Error error;
+	unsigned int regVal = 0;
+	error = pCam->ReadRegister( k_triggerInq, &regVal );
+	if (error != PGRERROR_OK){
+		PrintError( error );
+		return false;
+	}
+	if( ( regVal & 0x10000 ) != 0x10000 ){
+		return false;
+	}
+	return true;
+}
+
+bool PollForTriggerReady( Camera* pCam ){
+	const unsigned int k_softwareTrigger = 0x62C;
+	Error error;
+	unsigned int regVal = 0;
+	do{
+		error = pCam->ReadRegister( k_softwareTrigger, &regVal );
+		if (error != PGRERROR_OK){
+			PrintError( error );
+			return false;
+		}
+
+	}while ( (regVal >> 31) != 0 );
+	return true;
+}
+
+bool FireSoftwareTrigger( Camera* pCam ){
+	const unsigned int k_softwareTrigger = 0x62C;
+	const unsigned int k_fireVal = 0x80000000;
+	Error error;	
+	error = pCam->WriteRegister( k_softwareTrigger, k_fireVal );
+	if (error != PGRERROR_OK){
+		PrintError( error );
+		return false;
+	}
+	return true;
+}
+
+

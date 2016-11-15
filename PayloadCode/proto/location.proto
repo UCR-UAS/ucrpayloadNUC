@@ -1,0 +1,12 @@
+package location;
+
+message PlaneLocation {
+	optional float alt_agl_meters = 1;
+	optional float alt_asl_meters = 2;
+	optional float roll_degrees   = 3;
+	optional float pitch_degrees  = 4;
+	optional float yaw_degrees    = 5;
+	optional double lat_degrees   = 6;
+	optional double lon_degrees   = 7;
+}
+

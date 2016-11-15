@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 2.8)
+project(SpectralSaliency )
+find_package( OpenCV REQUIRED )
+add_executable( SpectralSaliency FrequencySaliencyDetection7_1.cpp )
+target_link_libraries( SpectralSaliency ${OpenCV_LIBS} )
